@@ -2,6 +2,10 @@
 
 A desktop app that translates `.docx` files paragraph by paragraph via the OpenAI API, preserving formatting, inline objects, and character styles. Runs on **Windows, macOS, and Linux**.
 
+<div align="center">
+<img src="https://raw.githubusercontent.com/wdev95/Docx-Translator-OpenAI/refs/heads/main/Screenshot.png" width="80%"  />
+</div>
+
 > **Note:** The Windows taskbar progress indicator (PyTaskbar) is automatically disabled on non-Windows systems. All other features work cross-platform.
 
 > The script was completely written by AI
@@ -101,6 +105,14 @@ pip install openai python-docx sv-ttk darkdetect PyTaskbar
 
 ```bat
 python translate.py
+```
+
+---
+
+## 6. Compile the app
+
+```bat
+python compile.py
 ```
 
 ---
