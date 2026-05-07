@@ -4101,28 +4101,81 @@ class TranslatorApp:
 		list_outer = ttk.Frame(outer)
 		list_outer.pack(fill="both", expand=True)
 
-		canvas = tk.Canvas(list_outer, bg="#ffffff", highlightthickness=0)
+		frame_bg = ttk.Style().lookup("TFrame", "background") or self.root.cget("bg")
+		canvas = tk.Canvas(list_outer, bg=frame_bg, highlightthickness=0)
 		scrollbar = ttk.Scrollbar(list_outer, orient="vertical", command=canvas.yview)
 		canvas.configure(yscrollcommand=scrollbar.set)
-		scrollbar.pack(side="right", fill="y")
 		canvas.pack(side="left", fill="both", expand=True)
+		scrollbar_visible = False
+		can_scroll = False
 
 		inner = ttk.Frame(canvas)
 		canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
 
+		def _update_scroll_state() -> None:
+			nonlocal scrollbar_visible, can_scroll
+			bbox = canvas.bbox("all")
+			content_height = (bbox[3] - bbox[1]) if bbox else 0
+			viewport_height = max(1, int(canvas.winfo_height()))
+			needs_scroll = content_height > (viewport_height + 1)
+			can_scroll = needs_scroll
+			if needs_scroll and not scrollbar_visible:
+				scrollbar.pack(side="right", fill="y")
+				scrollbar_visible = True
+			elif not needs_scroll and scrollbar_visible:
+				scrollbar.pack_forget()
+				scrollbar_visible = False
+			if not needs_scroll:
+				canvas.yview_moveto(0)
+
 		def _on_inner_configure(_event) -> None:
 			canvas.configure(scrollregion=canvas.bbox("all"))
+			_update_scroll_state()
 
 		def _on_canvas_configure(event) -> None:
 			canvas.itemconfig(canvas_window, width=event.width)
+			_update_scroll_state()
+
+		def _on_mousewheel(event) -> str:
+			if not can_scroll:
+				return "break"
+			if getattr(event, "num", None) == 4:
+				canvas.yview_scroll(-1, "units")
+				return "break"
+			if getattr(event, "num", None) == 5:
+				canvas.yview_scroll(1, "units")
+				return "break"
+			delta = int(getattr(event, "delta", 0) or 0)
+			if delta == 0:
+				return "break"
+			if sys.platform == "win32":
+				steps = int(-delta / 120)
+				if steps == 0:
+					steps = -1 if delta > 0 else 1
+			else:
+				steps = -1 if delta > 0 else 1
+			canvas.yview_scroll(steps, "units")
+			return "break"
+
+		def _bind_mousewheel(widget) -> None:
+			widget.bind("<MouseWheel>", _on_mousewheel)
+			widget.bind("<Button-4>", _on_mousewheel)
+			widget.bind("<Button-5>", _on_mousewheel)
 
 		inner.bind("<Configure>", _on_inner_configure)
 		canvas.bind("<Configure>", _on_canvas_configure)
+		_bind_mousewheel(canvas)
+		_bind_mousewheel(inner)
+		_bind_mousewheel(list_outer)
 
 		for style_name in self.available_styles:
 			var = tk.BooleanVar(value=style_name in self.selected_styles)
 			check_vars[style_name] = var
-			ttk.Checkbutton(inner, text=style_name, variable=var).pack(anchor="w", padx=8, pady=3)
+			cb = ttk.Checkbutton(inner, text=style_name, variable=var)
+			cb.pack(anchor="w", padx=8, pady=3)
+			_bind_mousewheel(cb)
+
+		win.after_idle(_update_scroll_state)
 
 		def apply() -> None:
 			self.selected_styles = {name for name, v in check_vars.items() if v.get()}
@@ -4170,28 +4223,81 @@ class TranslatorApp:
 		list_outer = ttk.Frame(outer)
 		list_outer.pack(fill="both", expand=True)
 
-		canvas = tk.Canvas(list_outer, bg="#ffffff", highlightthickness=0)
+		frame_bg = ttk.Style().lookup("TFrame", "background") or self.root.cget("bg")
+		canvas = tk.Canvas(list_outer, bg=frame_bg, highlightthickness=0)
 		scrollbar = ttk.Scrollbar(list_outer, orient="vertical", command=canvas.yview)
 		canvas.configure(yscrollcommand=scrollbar.set)
-		scrollbar.pack(side="right", fill="y")
 		canvas.pack(side="left", fill="both", expand=True)
+		scrollbar_visible = False
+		can_scroll = False
 
 		inner = ttk.Frame(canvas)
 		canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
 
+		def _update_scroll_state() -> None:
+			nonlocal scrollbar_visible, can_scroll
+			bbox = canvas.bbox("all")
+			content_height = (bbox[3] - bbox[1]) if bbox else 0
+			viewport_height = max(1, int(canvas.winfo_height()))
+			needs_scroll = content_height > (viewport_height + 1)
+			can_scroll = needs_scroll
+			if needs_scroll and not scrollbar_visible:
+				scrollbar.pack(side="right", fill="y")
+				scrollbar_visible = True
+			elif not needs_scroll and scrollbar_visible:
+				scrollbar.pack_forget()
+				scrollbar_visible = False
+			if not needs_scroll:
+				canvas.yview_moveto(0)
+
 		def _on_inner_configure(_event) -> None:
 			canvas.configure(scrollregion=canvas.bbox("all"))
+			_update_scroll_state()
 
 		def _on_canvas_configure(event) -> None:
 			canvas.itemconfig(canvas_window, width=event.width)
+			_update_scroll_state()
+
+		def _on_mousewheel(event) -> str:
+			if not can_scroll:
+				return "break"
+			if getattr(event, "num", None) == 4:
+				canvas.yview_scroll(-1, "units")
+				return "break"
+			if getattr(event, "num", None) == 5:
+				canvas.yview_scroll(1, "units")
+				return "break"
+			delta = int(getattr(event, "delta", 0) or 0)
+			if delta == 0:
+				return "break"
+			if sys.platform == "win32":
+				steps = int(-delta / 120)
+				if steps == 0:
+					steps = -1 if delta > 0 else 1
+			else:
+				steps = -1 if delta > 0 else 1
+			canvas.yview_scroll(steps, "units")
+			return "break"
+
+		def _bind_mousewheel(widget) -> None:
+			widget.bind("<MouseWheel>", _on_mousewheel)
+			widget.bind("<Button-4>", _on_mousewheel)
+			widget.bind("<Button-5>", _on_mousewheel)
 
 		inner.bind("<Configure>", _on_inner_configure)
 		canvas.bind("<Configure>", _on_canvas_configure)
+		_bind_mousewheel(canvas)
+		_bind_mousewheel(inner)
+		_bind_mousewheel(list_outer)
 
 		for style_name in self.available_char_styles:
 			var = tk.BooleanVar(value=style_name in self.selected_char_styles)
 			check_vars[style_name] = var
-			ttk.Checkbutton(inner, text=style_name, variable=var).pack(anchor="w", padx=8, pady=3)
+			cb = ttk.Checkbutton(inner, text=style_name, variable=var)
+			cb.pack(anchor="w", padx=8, pady=3)
+			_bind_mousewheel(cb)
+
+		win.after_idle(_update_scroll_state)
 
 		def apply() -> None:
 			self.selected_char_styles = {name for name, v in check_vars.items() if v.get()}
