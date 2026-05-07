@@ -1838,21 +1838,25 @@ def apply_incremental_translation_seed(
 		current_paragraphs: list[object] = []
 		current_indices: list[int] = []
 		current_style: str | None = None
+		last_index: int | None = None
 		for abs_index, paragraph in entries:
 			style_name = (paragraph.style.name or "").strip() if paragraph.style else ""
 			if not current_paragraphs:
 				current_paragraphs = [paragraph]
 				current_indices = [abs_index]
 				current_style = style_name
+				last_index = abs_index
 				continue
-			if style_name == current_style:
+			if style_name == current_style and last_index is not None and abs_index == last_index + 1:
 				current_paragraphs.append(paragraph)
 				current_indices.append(abs_index)
+				last_index = abs_index
 				continue
 			blocks.append({"style": current_style or "", "paragraphs": current_paragraphs, "indices": current_indices})
 			current_paragraphs = [paragraph]
 			current_indices = [abs_index]
 			current_style = style_name
+			last_index = abs_index
 		if current_paragraphs:
 			blocks.append({"style": current_style or "", "paragraphs": current_paragraphs, "indices": current_indices})
 		return blocks
@@ -2182,12 +2186,8 @@ def translate_docx(
 	output_all_paragraphs: list = []
 	if incremental_result is not None:
 		paragraphs, paragraph_indices, output_doc, output_all_paragraphs = incremental_result
-	# Keep API calls low: group by consecutive style within translatable entries (legacy behavior).
-	# In incremental mode, changed paragraphs may be non-consecutive, so use indices.
-	if output_doc is not None:
-		paragraph_groups = group_consecutive_paragraphs_by_style(paragraphs, paragraph_indices=paragraph_indices)
-	else:
-		paragraph_groups = group_consecutive_paragraphs_by_style(paragraphs)
+	# Always use absolute paragraph indices so non-selected styles still split blocks.
+	paragraph_groups = group_consecutive_paragraphs_by_style(paragraphs, paragraph_indices=paragraph_indices)
 	total_candidates = len(paragraphs)
 	total_blocks = len(paragraph_groups)
 	processed_blocks = 0
