@@ -1,0 +1,67 @@
+name: Build And Release EXE
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, z.B. v1.4.0"
+        required: true
+      title:
+        description: "Release title"
+        required: false
+      notes:
+        description: "Release notes (optional)"
+        required: false
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller openai python-docx sv-ttk darkdetect PyTaskbar
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          python compile.py
+          if (!(Test-Path "dist/DOCX-Translator/DOCX-Translator.exe")) {
+            throw "EXE not found after build."
+          }
+
+      - name: Create or update release with EXE
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ inputs.tag }}"
+          $title = "${{ inputs.title }}"
+          if ([string]::IsNullOrWhiteSpace($title)) { $title = $tag }
+          $notes = "${{ inputs.notes }}"
+          $exe = "dist/DOCX-Translator/DOCX-Translator.exe"
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $exe --clobber
+          } else {
+            if ([string]::IsNullOrWhiteSpace($notes)) {
+              gh release create $tag $exe --title $title --generate-notes --target "${{ github.sha }}"
+            } else {
+              $notesFile = Join-Path $env:RUNNER_TEMP "release_notes.txt"
+              Set-Content -Path $notesFile -Value $notes -Encoding UTF8
+              gh release create $tag $exe --title $title --notes-file $notesFile --target "${{ github.sha }}"
+            }
+          }
