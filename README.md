@@ -4,13 +4,14 @@ A desktop app that translates `.docx` files paragraph by paragraph via the OpenA
 
 > **Note:** The Windows taskbar progress indicator (PyTaskbar) is automatically disabled on non-Windows systems. All other features work cross-platform.
 
+> The script was completely written by AI
+
 ---
 
 ## Requirements
 
 - Python 3.11 or newer
 - An OpenAI API key
-- Windows only: `PyTaskbar` for taskbar progress (installed automatically via `pip`, silently skipped on other platforms)
 
 ---
 

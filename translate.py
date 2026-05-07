@@ -12,7 +12,7 @@ import threading
 import tkinter as tk
 from difflib import SequenceMatcher
 import darkdetect
-import sv_ttk
+import svc_ttk
 import zipfile
 from copy import deepcopy
 from datetime import datetime
@@ -50,8 +50,15 @@ FX_RATE_ENDPOINTS = (
 	"https://api.frankfurter.app/latest?from=USD&to=EUR",
 )
 DEFAULT_LANGUAGE_CODES = ["de", "en-US", "en-GB", "it", "es-ES", "es-419", "fr"]
+DEFAULT_THEME_MODE = "System"
+THEME_MODE_OPTIONS = ("System", "Dark", "Light")
 SETTINGS_FILE = Path(__file__).with_name("translate_settings.json")
 MODEL_PRICING_FILE = Path(__file__).with_name("openai_model_prices.json")
+
+# ── Layout spacing ─────────────────────────────────────────────────────────────
+# All paddings and margins are multiples of GS (Grid Size).
+# Change GS here to scale all spacing throughout the app uniformly.
+GS = 4  # base grid unit in pixels
 
 def _coerce_float(value: object) -> float | None:
 	try:
@@ -86,6 +93,23 @@ def _clean_language_codes(values: object) -> list[str]:
 			seen.add(code)
 			out.append(code)
 	return out or list(DEFAULT_LANGUAGE_CODES)
+
+def _normalize_theme_mode(value: object) -> str:
+	mode = str(value or "").strip().lower()
+	if mode == "dark":
+		return "Dark"
+	if mode == "light":
+		return "Light"
+	return DEFAULT_THEME_MODE
+
+def _resolve_sv_ttk_theme(theme_mode: str) -> str:
+	mode = _normalize_theme_mode(theme_mode)
+	if mode == "Dark":
+		return "dark"
+	if mode == "Light":
+		return "light"
+	detected = str(darkdetect.theme() or "").strip().lower()
+	return "dark" if detected.startswith("dark") else "light"
 
 def load_model_pricing_document() -> dict[str, Any]:
 	if not MODEL_PRICING_FILE.exists():
@@ -717,6 +741,55 @@ def parse_bold_markdown(text: str) -> list[tuple[str, bool]]:
 			segments.append((part, False))
 	return segments
 
+def _contains_term_ci(text: str, term: str) -> bool:
+	if not text or not term:
+		return False
+	return re.search(re.escape(term), text, flags=re.IGNORECASE) is not None
+
+def _source_term_has_bold_occurrence(tagged_source_text: str, source_term: str) -> bool:
+	if not source_term:
+		return False
+	for segment, is_bold in parse_bold_markdown(tagged_source_text):
+		if is_bold and _contains_term_ci(segment, source_term):
+			return True
+	return False
+
+def _strip_markdown_bold_for_term(text: str, term: str) -> tuple[str, int]:
+	if not text or not term:
+		return text, 0
+	term_pattern = re.sub(r"\\\s+", r"\\s+", re.escape(term.strip()))
+	if not term_pattern:
+		return text, 0
+	pattern = re.compile(rf"\*\*(\s*{term_pattern}\s*)\*\*", flags=re.IGNORECASE)
+	result, count = pattern.subn(lambda m: m.group(1), text)
+	return result, count
+
+def remove_unwanted_glossary_bold(
+	tagged_source_text: str,
+	translated_text: str,
+	glossary_entries: list[dict[str, str]],
+) -> str:
+	updated = translated_text
+	for item in glossary_entries:
+		left = str(item.get("left", "") or "").strip()
+		right = str(item.get("right", "") or "").strip()
+		if not left or not right:
+			continue
+
+		left_in_source = _contains_term_ci(tagged_source_text, left)
+		right_in_source = _contains_term_ci(tagged_source_text, right)
+		mappings: list[tuple[str, str]] = []
+		if left_in_source and not right_in_source:
+			mappings.append((left, right))
+		elif right_in_source and not left_in_source:
+			mappings.append((right, left))
+
+		for source_term, target_term in mappings:
+			if _source_term_has_bold_occurrence(tagged_source_text, source_term):
+				continue
+			updated, _ = _strip_markdown_bold_for_term(updated, target_term)
+	return updated
+
 def resolve_preferred_bold_style_name(paragraph) -> tuple[object | None, bool, bool]:
 	styles = list(paragraph.part.styles)
 	fett_exists = any(str(getattr(s, "style_id", "") or "").strip().lower() == "fett" or (getattr(s, "name", "") or "").strip().lower() == "fett" for s in styles)
@@ -1318,6 +1391,7 @@ def load_gui_settings() -> dict:
 	payload["language_codes"] = language_codes
 	payload["source_language"] = source
 	payload["target_language"] = target
+	payload["theme_mode"] = _normalize_theme_mode(payload.get("theme_mode"))
 	try:
 		SETTINGS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 	except Exception:
@@ -1376,6 +1450,7 @@ def save_gui_settings(
 	selected_char_styles: list[str] | None = None,
 	source_language: str | None = None,
 	target_language: str | None = None,
+	theme_mode: str | None = None,
 	debug_mode: bool | None = None,
 	glossary_pairs: dict[str, list[dict[str, str]]] | None = None,
 	api_key: str | None = None,
@@ -1396,6 +1471,8 @@ def save_gui_settings(
 			payload["source_language"] = _canon_lang(source_language)
 		if target_language is not None:
 			payload["target_language"] = _canon_lang(target_language)
+		if theme_mode is not None:
+			payload["theme_mode"] = _normalize_theme_mode(theme_mode)
 		if debug_mode is not None:
 			payload["debug_mode"] = bool(debug_mode)
 		if glossary_pairs is not None:
@@ -1413,6 +1490,7 @@ def save_gui_settings(
 		target = _canon_lang(str(payload.get("target_language") or default_target)) or default_target
 		payload["source_language"] = source if source in codes else default_source
 		payload["target_language"] = target if target in codes else default_target
+		payload["theme_mode"] = _normalize_theme_mode(payload.get("theme_mode"))
 
 		SETTINGS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 	except Exception:
@@ -1520,7 +1598,7 @@ class OpenAIParagraphTranslator:
 					{
 						"role": "system",
 						"content": (
-							"Terminology table (bidirectional). If either side appears, use the paired term exactly where appropriate: "
+							"Terminology table (bidirectional). If either side appears, use the paired term exactly where appropriate. Do not add **bold** just because a glossary term exists; bold must only follow source formatting: "
 							+ compact_json(relevant_glossary)
 						),
 					}
@@ -1574,6 +1652,9 @@ class OpenAIParagraphTranslator:
 				if attempt == 3:
 					raise ValueError(last_error)
 				continue
+
+			if relevant_glossary:
+				translated_text = remove_unwanted_glossary_bold(tagged_paragraph, translated_text, relevant_glossary)
 
 			try:
 				validated_text = validate_math_anchor_output(
@@ -2552,7 +2633,7 @@ def translate_docx(
 		apply_document_language(doc, target_language)
 		doc.save(str(output_path))
 	snapshot_save_error: str | None = None
-	if not cancelled and failed_count == 0:
+	if not cancelled:
 		try:
 			shutil.copy2(str(input_path), str(snapshot_path))
 		except Exception as exc:
@@ -2563,12 +2644,6 @@ def translate_docx(
 				"error": f"Snapshot could not be saved: {snapshot_path}",
 				"attempts": "-",
 			})
-	elif not cancelled and failed_count > 0:
-		failed_items.append({
-			"paragraph": "Snapshot",
-			"error": f"Snapshot skipped because there were translation errors ({failed_count}).",
-			"attempts": "-",
-		})
 	if snapshot_save_error:
 		failed_items.append({
 			"paragraph": "Snapshot",
@@ -2633,6 +2708,7 @@ class TranslatorApp:
 		self.api_key_var = tk.StringVar(value=saved_api_key)
 		self.source_lang_var = tk.StringVar(value=default_source)
 		self.target_lang_var = tk.StringVar(value=default_target)
+		self.theme_var = tk.StringVar(value=_normalize_theme_mode(self.settings.get("theme_mode")))
 		self.debug_var = tk.BooleanVar(value=bool(self.settings.get("debug_mode", False)))
 		self.styles_info_var = tk.StringVar(value="Select a file first")
 		self.char_styles_info_var = tk.StringVar(value="Select a file first")
@@ -2677,7 +2753,7 @@ class TranslatorApp:
 		self.root.after(100, self._poll_queue)
 
 	def _configure_style(self) -> None:
-		sv_ttk.set_theme(darkdetect.theme())
+		self._apply_theme()
 		style = ttk.Style()
 
 		# Font definitions for custom labels
@@ -2701,8 +2777,14 @@ class TranslatorApp:
 			thickness=14,
 		)
 
+	def _apply_theme(self) -> None:
+		theme_mode = _normalize_theme_mode(self.theme_var.get() if hasattr(self, "theme_var") else DEFAULT_THEME_MODE)
+		if hasattr(self, "theme_var"):
+			self.theme_var.set(theme_mode)
+		svc_ttk.set_theme(_resolve_sv_ttk_theme(theme_mode))
+
 	def _build_ui(self) -> None:
-		outer = ttk.Frame(self.root, padding=(20, 14))
+		outer = ttk.Frame(self.root, padding=GS)
 		outer.pack(fill="both", expand=True)
 
 		ttk.Label(outer, text="DOCX Translation Studio", style="Header.TLabel").pack(anchor="w")
@@ -2710,101 +2792,88 @@ class TranslatorApp:
 			outer,
 			text="Translates paragraph by paragraph, preserving formatting and inline objects.",
 			style="Sub.TLabel",
-		).pack(anchor="w", pady=(2, 10))
+		).pack(anchor="w")
 
-		body = ttk.Frame(outer)
+		body = ttk.PanedWindow(outer, orient="horizontal")
 		body.pack(fill="both", expand=True)
-		body.columnconfigure(0, weight=1, uniform="main-panels")
-		body.columnconfigure(1, weight=1, uniform="main-panels")
-		body.rowconfigure(0, weight=1)
 
 		# ── LEFT PANEL ────────────────────────────────────────────────────────
-		left = ttk.Frame(body, style="Card.TFrame", padding=(18, 14))
-		left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+		left = ttk.Frame(body, style="Card.TFrame", padding=GS)
 		left.columnconfigure(0, weight=1)
 		left.columnconfigure(1, weight=0)
+		body.add(left, weight=1)
 
 		# ── RIGHT PANEL (expands) ───────────────────────────────────────────────
-		right = ttk.Frame(body, style="Card.TFrame", padding=(18, 14))
-		right.grid(row=0, column=1, sticky="nsew")
+		right = ttk.Frame(body, style="Card.TFrame", padding=GS)
 		right.columnconfigure(0, weight=1)
+		body.add(right, weight=1)
 
 		# ── Left: File ─────────────────────────────────────────────────────────────────
 		r = 0
 		ttk.Label(left, text="Input DOCX", style="Label.TLabel").grid(row=r, column=0, sticky="w")
 		r += 1
 		file_entry = ttk.Entry(left, textvariable=self.file_var, font=("Segoe UI", 10))
-		file_entry.grid(row=r, column=0, sticky="ew", pady=(4, 0))
+		file_entry.grid(row=r, column=0, sticky="ew")
 		self.file_button = ttk.Button(
 			left, text="Choose File", style="Secondary.TButton", width=17, command=self._choose_file
 		)
-		self.file_button.grid(row=r, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+		self.file_button.grid(row=r, column=1, sticky="ew")
 		r += 1
-		ttk.Separator(left, orient="horizontal").grid(
-			row=r, column=0, columnspan=2, sticky="ew", pady=(10, 8)
-		)
+		ttk.Separator(left, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew")
 		r += 1
 
 		# ── Left: Styles ───────────────────────────────────────────────────────────────────
-		ttk.Label(left, textvariable=self.styles_info_var, style="Status.TLabel").grid(
-			row=r, column=0, sticky="w"
-		)
+		ttk.Label(left, textvariable=self.styles_info_var, style="Status.TLabel").grid(row=r, column=0, sticky="w")
 		self.styles_button = ttk.Button(
 			left, text="Styles", style="Secondary.TButton", width=17,
 			command=self._open_style_selector
 		)
-		self.styles_button.grid(row=r, column=1, sticky="ew", padx=(8, 0))
+		self.styles_button.grid(row=r, column=1, sticky="ew")
 		self.styles_button.configure(state="disabled")
 		r += 1
-		ttk.Label(left, textvariable=self.char_styles_info_var, style="Status.TLabel").grid(
-			row=r, column=0, sticky="w", pady=(4, 0)
-		)
+		ttk.Label(left, textvariable=self.char_styles_info_var, style="Status.TLabel").grid(row=r, column=0, sticky="w")
 		self.char_styles_button = ttk.Button(
 			left, text="Char Styles", style="Secondary.TButton", width=17,
 			command=self._open_char_style_selector
 		)
-		self.char_styles_button.grid(row=r, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+		self.char_styles_button.grid(row=r, column=1, sticky="ew")
 		self.char_styles_button.configure(state="disabled")
 		r += 1
 		self.cleaner_button = ttk.Button(
 			left, text="Clean Up", style="Secondary.TButton", width=17,
 			command=self._open_style_cleaner
 		)
-		self.cleaner_button.grid(row=r, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+		self.cleaner_button.grid(row=r, column=1, sticky="ew")
 		self.cleaner_button.configure(state="disabled")
 		r += 1
 		self.sort_styles_button = ttk.Button(
 			left, text="Sort Styles", style="Secondary.TButton", width=17,
 			command=self._open_style_priority_editor
 		)
-		self.sort_styles_button.grid(row=r, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+		self.sort_styles_button.grid(row=r, column=1, sticky="ew")
 		self.sort_styles_button.configure(state="disabled")
 		r += 1
-		ttk.Separator(left, orient="horizontal").grid(
-			row=r, column=0, columnspan=2, sticky="ew", pady=(10, 8)
-		)
+		ttk.Separator(left, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew")
 		r += 1
 
 		# ── Left: Languages ──────────────────────────────────────────────────────────────────
-		lang_frame = ttk.Frame(left, style="Card.TFrame")
+		lang_frame = ttk.Frame(left, padding=GS)
 		lang_frame.grid(row=r, column=0, columnspan=2, sticky="ew")
 		lang_frame.columnconfigure(0, weight=1)
 		lang_frame.columnconfigure(1, weight=1)
 		ttk.Label(lang_frame, text="Source Language", style="Label.TLabel").grid(row=0, column=0, sticky="w")
-		ttk.Label(lang_frame, text="Target Language", style="Label.TLabel").grid(
-			row=0, column=1, sticky="w", padx=(8, 0)
-		)
+		ttk.Label(lang_frame, text="Target Language", style="Label.TLabel").grid(row=0, column=1, sticky="w")
 		self.source_combo = ttk.Combobox(
 			lang_frame, textvariable=self.source_lang_var, values=self.language_codes,
 			state="readonly", font=("Segoe UI", 10)
 		)
-		self.source_combo.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+		self.source_combo.grid(row=1, column=0, sticky="ew")
 		self.source_combo.bind("<<ComboboxSelected>>", self._on_language_change)
 		self.target_combo = ttk.Combobox(
 			lang_frame, textvariable=self.target_lang_var, values=self.language_codes,
 			state="readonly", font=("Segoe UI", 10)
 		)
-		self.target_combo.grid(row=1, column=1, sticky="ew", pady=(4, 0), padx=(8, 0))
+		self.target_combo.grid(row=1, column=1, sticky="ew")
 		self.target_combo.bind("<<ComboboxSelected>>", self._on_language_change)
 		self.source_combo.configure(values=self.language_codes)
 		self.target_combo.configure(values=self.language_codes)
@@ -2814,29 +2883,25 @@ class TranslatorApp:
 			style="Secondary.TButton",
 			command=self._open_language_manager,
 		)
-		self.languages_button.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+		self.languages_button.grid(row=2, column=0, columnspan=2, sticky="ew")
 		r += 1
 
 		# ── Left: Glossary ──────────────────────────────────────────────────────────────────
-		ttk.Label(left, textvariable=self.glossary_info_var, style="Status.TLabel").grid(
-			row=r, column=0, sticky="w", pady=(6, 0)
-		)
+		ttk.Label(left, textvariable=self.glossary_info_var, style="Status.TLabel").grid(row=r, column=0, sticky="w")
 		self.glossary_button = ttk.Button(
 			left, text="Edit Glossary", style="Secondary.TButton", width=17,
 			command=self._open_glossary_editor
 		)
-		self.glossary_button.grid(row=r, column=1, sticky="ew", padx=(8, 0), pady=(6, 0))
+		self.glossary_button.grid(row=r, column=1, sticky="ew")
 		r += 1
-		ttk.Separator(left, orient="horizontal").grid(
-			row=r, column=0, columnspan=2, sticky="ew", pady=(10, 8)
-		)
+		ttk.Separator(left, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew")
 		r += 1
 
 		# ── Left: Model ─────────────────────────────────────────────────────────────────────
 		ttk.Label(left, text="OpenAI Model", style="Label.TLabel").grid(row=r, column=0, columnspan=2, sticky="w")
 		r += 1
-		self.model_selector_frame = ttk.Frame(left, style="Card.TFrame")
-		self.model_selector_frame.grid(row=r, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+		self.model_selector_frame = ttk.Frame(left, padding=GS)
+		self.model_selector_frame.grid(row=r, column=0, columnspan=2, sticky="ew")
 		self.model_selector_frame.columnconfigure(0, weight=1)
 		self.model_selector_frame.bind("<Configure>", self._on_model_selector_resize)
 		self.model_display_table = ttk.Treeview(
@@ -2863,11 +2928,11 @@ class TranslatorApp:
 			width=4,
 			command=self._open_model_picker,
 		)
-		self.model_picker_button.grid(row=0, column=1, padx=(6, 0), sticky="ns")
+		self.model_picker_button.grid(row=0, column=1, sticky="ns")
 		self._resize_model_tree_columns(self.model_display_table, self.model_selector_frame.winfo_width())
 		r += 1
-		model_actions = ttk.Frame(left, style="Card.TFrame")
-		model_actions.grid(row=r, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+		model_actions = ttk.Frame(left, padding=GS)
+		model_actions.grid(row=r, column=0, columnspan=2, sticky="ew")
 		model_actions.columnconfigure(0, weight=1)
 		model_actions.columnconfigure(1, weight=1)
 		model_actions.columnconfigure(2, weight=1)
@@ -2880,47 +2945,41 @@ class TranslatorApp:
 			model_actions, text="Update Model Prices", style="Secondary.TButton",
 			command=self._request_model_price_update
 		)
-		self.refresh_prices_button.grid(row=0, column=1, sticky="ew", padx=(8, 8))
+		self.refresh_prices_button.grid(row=0, column=1, sticky="ew")
 		self.settings_button = ttk.Button(
 			model_actions, text="Settings", style="Secondary.TButton",
 			command=self._open_settings_window
 		)
 		self.settings_button.grid(row=0, column=2, sticky="ew")
 		r += 1
-		ttk.Separator(left, orient="horizontal").grid(
-			row=r, column=0, columnspan=2, sticky="ew", pady=(12, 10)
-		)
+		ttk.Separator(left, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew")
 		r += 1
 
 		# ── Left: Start / Pause / Cancel ───────────────────────────────────────────────────
-		button_row = ttk.Frame(left)
-		button_row.grid(row=r, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+		button_row = ttk.Frame(left, padding=GS)
+		button_row.grid(row=r, column=0, columnspan=2, sticky="ew")
 		button_row.columnconfigure(0, weight=1)
 		button_row.columnconfigure(1, weight=1)
 		button_row.columnconfigure(2, weight=1)
-		
 		self.start_button = ttk.Button(
 			button_row, text="Start Translation", command=self._start
 		)
 		self.start_button.grid(row=0, column=0, sticky="ew")
-		
 		self.pause_button = ttk.Button(
 			button_row, text="Pause", command=self._toggle_pause
 		)
-		self.pause_button.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+		self.pause_button.grid(row=0, column=1, sticky="ew")
 		self.pause_button.configure(state="disabled")
-		
 		self.cancel_button = ttk.Button(
 			button_row, text="Cancel", command=self._cancel
 		)
-		self.cancel_button.grid(row=0, column=2, sticky="ew", padx=(8, 0))
+		self.cancel_button.grid(row=0, column=2, sticky="ew")
 		self.cancel_button.configure(state="disabled")
-		r += 1
 		self.debug_check = ttk.Checkbutton(
-			left, text="Debug Mode (Anchor Diagnostics)", variable=self.debug_var,
+			button_row, text="Debug Mode (Anchor Diagnostics)", variable=self.debug_var,
 			command=self._persist_model_selection
 		)
-		self.debug_check.grid(row=r, column=0, columnspan=2, sticky="w", pady=(10, 0))
+		self.debug_check.grid(row=1, column=0, columnspan=3, sticky="w")
 		r += 1
 		left.rowconfigure(r, weight=1)
 
@@ -2932,12 +2991,12 @@ class TranslatorApp:
 			right, style="Modern.Horizontal.TProgressbar", orient="horizontal",
 			mode="determinate", maximum=100, variable=self.progress_var
 		)
-		self.progress.grid(row=rr, column=0, sticky="ew", pady=(4, 0))
+		self.progress.grid(row=rr, column=0, sticky="ew")
 		rr += 1
 
 		# ── Right: Counters ───────────────────────────────────────────────────────────────
-		counter_outer = ttk.Frame(right, style="Card.TFrame")
-		counter_outer.grid(row=rr, column=0, sticky="ew", pady=(10, 0))
+		counter_outer = ttk.Frame(right, padding=GS)
+		counter_outer.grid(row=rr, column=0, sticky="ew")
 		counter_outer.columnconfigure(0, weight=1)
 		counter_outer.columnconfigure(1, weight=1)
 		self.warning_counter_label = ttk.Label(
@@ -2947,7 +3006,7 @@ class TranslatorApp:
 		self.error_counter_label = ttk.Label(
 			counter_outer, textvariable=self.error_counter_var, style="ErrorCounter.TLabel"
 		)
-		self.error_counter_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
+		self.error_counter_label.grid(row=1, column=0, sticky="w")
 		self.token_counter_label = ttk.Label(
 			counter_outer, textvariable=self.token_counter_var, style="UsageCounter.TLabel"
 		)
@@ -2955,22 +3014,22 @@ class TranslatorApp:
 		self.cost_counter_label = ttk.Label(
 			counter_outer, textvariable=self.cost_counter_var, style="UsageCounter.TLabel"
 		)
-		self.cost_counter_label.grid(row=1, column=1, sticky="w", pady=(2, 0))
+		self.cost_counter_label.grid(row=1, column=1, sticky="w")
 		rr += 1
 
 		# ── Right: Status / Live info ─────────────────────────────────────────────────
-		ttk.Separator(right, orient="horizontal").grid(row=rr, column=0, sticky="ew", pady=(10, 6))
+		ttk.Separator(right, orient="horizontal").grid(row=rr, column=0, sticky="ew")
 		rr += 1
 		self.status_label = ttk.Label(right, textvariable=self.status_var, style="StatusMono.TLabel")
 		self.status_label.grid(row=rr, column=0, sticky="ew")
 		rr += 1
 		self.live_info_label = ttk.Label(right, textvariable=self.live_info_var, style="LiveInfo.TLabel")
-		self.live_info_label.grid(row=rr, column=0, sticky="ew", pady=(4, 0))
+		self.live_info_label.grid(row=rr, column=0, sticky="ew")
 		rr += 1
 		self.api_request_info_label = ttk.Label(
 			right, textvariable=self.api_request_info_var, style="LiveInfo.TLabel"
 		)
-		self.api_request_info_label.grid(row=rr, column=0, sticky="ew", pady=(2, 0))
+		self.api_request_info_label.grid(row=rr, column=0, sticky="ew")
 		rr += 1
 
 		# ── Right: Reveal button ──────────────────────────────────────────────────────────
@@ -2978,25 +3037,25 @@ class TranslatorApp:
 			right, text="Open in Explorer", style="Secondary.TButton",
 			command=self._open_output_folder
 		)
-		self.reveal_button.grid(row=rr, column=0, sticky="ew", pady=(8, 0))
+		self.reveal_button.grid(row=rr, column=0, sticky="ew")
 		self.reveal_button.grid_remove()
 		rr += 1
 
 		# ── Right: Error log (expands) ────────────────────────────────────────────────────
 		right.rowconfigure(rr, weight=1)
-		error_row = ttk.Frame(right, style="Card.TFrame")
-		error_row.grid(row=rr, column=0, sticky="nsew", pady=(12, 0))
+		error_row = ttk.Frame(right, padding=GS)
+		error_row.grid(row=rr, column=0, sticky="nsew")
 		error_row.columnconfigure(0, weight=1)
 		error_row.rowconfigure(2, weight=1)
 		ttk.Label(error_row, text="Error Log", style="ErrorTitle.TLabel").grid(row=0, column=0, sticky="w")
-		controls_row = ttk.Frame(error_row, style="Card.TFrame")
-		controls_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+		controls_row = ttk.Frame(error_row, padding=GS)
+		controls_row.grid(row=1, column=0, sticky="ew")
 		self.clear_log_button = ttk.Button(
 			controls_row, text="Clear Log", style="Secondary.TButton", command=self._clear_error_log
 		)
 		self.clear_log_button.pack(side="right")
-		log_wrap = ttk.Frame(error_row, style="Card.TFrame")
-		log_wrap.grid(row=2, column=0, sticky="nsew", pady=(6, 0))
+		log_wrap = ttk.Frame(error_row, padding=GS)
+		log_wrap.grid(row=2, column=0, sticky="nsew")
 		log_wrap.rowconfigure(0, weight=1)
 		log_wrap.columnconfigure(0, weight=1)
 		self.error_log_text = tk.Text(
@@ -3024,7 +3083,22 @@ class TranslatorApp:
 		self.error_log_text.tag_configure("entry_sep", foreground="#6b7280")
 		self.error_log_text.configure(state="disabled")
 
-	def _save_settings(self, *, input_file: str | None = None, api_key: str | None = None, language_codes: list[str] | None = None) -> None:
+		for widget in left.winfo_children():
+			widget.grid(padx=GS, pady=GS)
+		for widget in right.winfo_children():
+			widget.grid(padx=GS, pady=GS)
+		for widget in counter_outer.winfo_children():
+			widget.grid(padx=GS, pady=GS)
+		for widget in button_row.winfo_children():
+			widget.grid(padx=GS, pady=GS)
+		for widget in lang_frame.winfo_children():
+			widget.grid(padx=GS, pady=GS)
+		for widget in model_actions.winfo_children():
+			widget.grid(padx=GS, pady=GS)
+		for widget in self.model_selector_frame.winfo_children():
+			widget.grid(padx=GS, pady=GS)
+
+	def _save_settings(self, *, input_file: str | None = None, api_key: str | None = None, language_codes: list[str] | None = None, theme_mode: str | None = None) -> None:
 		save_gui_settings(
 			input_file if input_file is not None else self.file_var.get().strip(),
 			self.model_var.get().strip(),
@@ -3032,6 +3106,7 @@ class TranslatorApp:
 			list(self.selected_char_styles),
 			self.source_lang_var.get().strip(),
 			self.target_lang_var.get().strip(),
+			theme_mode if theme_mode is not None else self.theme_var.get().strip(),
 			self.debug_var.get(),
 			self.glossary_pairs,
 			api_key if api_key is not None else self.api_key_var.get().strip(),
@@ -3179,9 +3254,28 @@ class TranslatorApp:
 		tree.column("cached", width=price_w)
 		tree.column("output", width=price_w)
 
+	def _schedule_model_selector_resize(self, width: int) -> None:
+		if width <= 0 or not hasattr(self, "model_display_table"):
+			return
+		last_width = getattr(self, "_last_model_selector_resize_width", None)
+		if last_width is not None and abs(last_width - width) < 12:
+			return
+		job = getattr(self, "_model_selector_resize_job", None)
+		if job is not None:
+			try:
+				self.root.after_cancel(job)
+			except tk.TclError:
+				pass
+		self._model_selector_resize_job = self.root.after(16, lambda: self._flush_model_selector_resize(width))
+
+	def _flush_model_selector_resize(self, width: int) -> None:
+		self._model_selector_resize_job = None
+		self._last_model_selector_resize_width = width
+		if hasattr(self, "model_display_table") and self.model_display_table.winfo_exists():
+			self._resize_model_tree_columns(self.model_display_table, width)
+
 	def _on_model_selector_resize(self, event) -> None:
-		if hasattr(self, "model_display_table"):
-			self._resize_model_tree_columns(self.model_display_table, event.width - 36)
+		self._schedule_model_selector_resize(event.width - 36)
 
 	def _model_output_usd(self, model_id: str) -> float | None:
 		pricing = model_pricing_for(model_id)
@@ -4501,7 +4595,7 @@ class TranslatorApp:
 		win = self._new_modal("Settings", 760, 560, 700, 500)
 		win.transient(self.root)
 
-		outer = ttk.Frame(win, padding=16)
+		outer = ttk.Frame(win, padding=GS)
 		outer.pack(fill="both", expand=True)
 
 		ttk.Label(outer, text="App Settings", style="Header.TLabel").pack(anchor="w")
@@ -4509,16 +4603,16 @@ class TranslatorApp:
 			outer,
 			text="This window can be extended with additional options.",
 			style="Sub.TLabel",
-		).pack(anchor="w", pady=(2, 14))
+		).pack(anchor="w", pady=GS)
 
-		openai_card = ttk.Frame(outer, style="Card.TFrame", padding=14)
+		openai_card = ttk.Frame(outer, style="Card.TFrame", padding=GS)
 		openai_card.pack(fill="x")
 		ttk.Label(openai_card, text="OpenAI", style="Label.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
-		ttk.Label(openai_card, text="API Key", style="Status.TLabel").grid(row=1, column=0, sticky="w", pady=(10, 0))
+		ttk.Label(openai_card, text="API Key", style="Status.TLabel").grid(row=1, column=0, sticky="w", pady=GS)
 
 		api_key_edit_var = tk.StringVar(value=self.api_key_var.get())
 		api_entry = ttk.Entry(openai_card, textvariable=api_key_edit_var, show="*", font=("Segoe UI", 10))
-		api_entry.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 4))
+		api_entry.grid(row=2, column=0, columnspan=2, sticky="ew", pady=GS)
 
 		key_hint = ttk.Label(
 			openai_card,
@@ -4537,32 +4631,47 @@ class TranslatorApp:
 			text="Show API Key",
 			variable=show_var,
 			command=toggle_show,
-		).grid(row=4, column=0, sticky="w", pady=(8, 0))
+		).grid(row=4, column=0, sticky="w", pady=GS)
 
 		openai_card.columnconfigure(0, weight=1)
 		openai_card.columnconfigure(1, weight=0)
 
-		future_card = ttk.Frame(outer, style="Card.TFrame", padding=12)
-		future_card.pack(fill="x", pady=(12, 0))
-		ttk.Label(future_card, text="More Settings", style="Label.TLabel").pack(anchor="w")
+		future_card = ttk.Frame(outer, style="Card.TFrame", padding=GS)
+		future_card.pack(fill="x", pady=GS)
+		ttk.Label(future_card, text="Appearance", style="Label.TLabel").grid(row=0, column=0, sticky="w")
+		ttk.Label(future_card, text="Theme", style="Status.TLabel").grid(row=1, column=0, sticky="w", pady=GS)
+
+		theme_edit_var = tk.StringVar(value=_normalize_theme_mode(self.theme_var.get()))
+		theme_combo = ttk.Combobox(
+			future_card,
+			textvariable=theme_edit_var,
+			values=list(THEME_MODE_OPTIONS),
+			state="readonly",
+			font=("Segoe UI", 10),
+		)
+		theme_combo.grid(row=2, column=0, sticky="w")
 		ttk.Label(
 			future_card,
-			text="Additional app options can be added here later.",
+			text="System follows your OS theme.",
 			style="Sub.TLabel",
-		).pack(anchor="w", pady=(4, 0))
+		).grid(row=3, column=0, sticky="w", pady=GS)
+		future_card.columnconfigure(0, weight=1)
 
 		def apply_settings() -> None:
 			new_api_key = api_key_edit_var.get().strip()
+			new_theme_mode = _normalize_theme_mode(theme_edit_var.get())
 			self.api_key_var.set(new_api_key)
-			self._save_settings(api_key=new_api_key)
+			self.theme_var.set(new_theme_mode)
+			self._apply_theme()
+			self._save_settings(api_key=new_api_key, theme_mode=new_theme_mode)
 			self.status_var.set("Settings saved.")
 			self._request_model_list()
 			win.destroy()
 
 		buttons = ttk.Frame(outer)
-		buttons.pack(fill="x", pady=(14, 0))
+		buttons.pack(fill="x", pady=GS)
 		ttk.Button(buttons, text="Save", style="Primary.TButton", command=apply_settings).pack(side="right")
-		ttk.Button(buttons, text="Cancel", style="Secondary.TButton", command=win.destroy).pack(side="right", padx=(0, 8))
+		ttk.Button(buttons, text="Cancel", style="Secondary.TButton", command=win.destroy).pack(side="right", padx=GS)
 
 	def _open_output_folder(self) -> None:
 		if self.last_output and self.last_output.exists():
@@ -4693,7 +4802,7 @@ class TranslatorApp:
 		self.current_block_start_cost_usd = 0.0
 		self.current_block_start_cost_eur = 0.0
 		self.live_info_var.set("Live-Info: -")
-		self.api_request_info_var.set("API Requests: 0 | Req-ID: - | Resp-ID: -")
+		self.api_request_info_var.set("Req-ID: - | Resp-ID: -")
 		self._refresh_usage_counters()
 		self.progress_var.set(0)
 		self.status_var.set("Starting translation...")
@@ -4833,7 +4942,7 @@ class TranslatorApp:
 						self.last_request_id_live = str(request_info.get("request_id", "-") or "-")
 						self.last_response_id_live = str(request_info.get("response_id", "-") or "-")
 						self.api_request_info_var.set(
-							f"API Requests: {self.api_request_count_live} | Req-ID: {self.last_request_id_live} | Resp-ID: {self.last_response_id_live}"
+							f"Req-ID: {self.last_request_id_live} | Resp-ID: {self.last_response_id_live}"
 						)
 					continue
 
@@ -5029,10 +5138,7 @@ class TranslatorApp:
 						snapshot_msg = str(failed_item.get("error", "")).strip()
 						if not snapshot_msg:
 							continue
-						if "skipped because there were translation errors" in snapshot_msg:
-							self._append_info_log("Snapshot not updated", [snapshot_msg])
-						else:
-							self._append_warning_log("Snapshot not saved", [snapshot_msg])
+						self._append_warning_log("Snapshot not saved", [snapshot_msg])
 
 				elif event == "models_loaded":
 					_, model_ids = item
